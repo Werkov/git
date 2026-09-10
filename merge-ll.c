@@ -17,6 +17,7 @@
 #include "quote.h"
 #include "strbuf.h"
 #include "gettext.h"
+#include "sigchain.h"
 
 struct ll_merge_driver;
 
@@ -201,7 +202,7 @@ static enum ll_merge_result ll_ext_merge(const struct ll_merge_driver *fn,
 	struct strbuf cmd = STRBUF_INIT;
 	const char *format = fn->cmdline;
 	struct child_process child = CHILD_PROCESS_INIT;
-	int status, fd, i;
+	int status, fd, i, sig;
 	struct stat st;
 	enum ll_merge_result ret;
 	assert(opts);
@@ -240,7 +241,13 @@ static enum ll_merge_result ll_ext_merge(const struct ll_merge_driver *fn,
 
 	child.use_shell = 1;
 	strvec_push(&child.args, cmd.buf);
-	status = run_command(&child);
+	status = -1;
+	if (start_command(&child) < 0)
+		goto bad;
+	sigchain_push(SIGINT, SIG_IGN);
+	sigchain_push(SIGQUIT, SIG_IGN);
+	status = finish_command(&child);
+
 	fd = open(temp[1], O_RDONLY);
 	if (fd < 0)
 		goto bad;
@@ -262,9 +269,15 @@ static enum ll_merge_result ll_ext_merge(const struct ll_merge_driver *fn,
 		ret = LL_MERGE_OK;
 	else if (status <= 128)
 		ret = LL_MERGE_CONFLICT;
-	else
+	else {
 		/* died due to a signal: WTERMSIG(status) + 128 */
+		sig = status - 128;
+		sigchain_pop(SIGINT);
+		sigchain_pop(SIGQUIT);
+		if (sig == SIGINT || sig == SIGQUIT)
+			raise(sig);
 		ret = LL_MERGE_ERROR;
+	}
 	return ret;
 }
 
